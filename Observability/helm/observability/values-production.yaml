@@ -1,0 +1,73 @@
+# Production values for observability stack
+
+prometheus:
+  replicas: 3
+  resources:
+    requests:
+      cpu: 1000m
+      memory: 4Gi
+    limits:
+      cpu: 4000m
+      memory: 16Gi
+  storage:
+    size: 100Gi
+    storageClass: "fast-ssd"
+  retention: 30d
+  hpa:
+    minReplicas: 3
+    maxReplicas: 10
+
+grafana:
+  replicas: 3
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+  storage:
+    size: 20Gi
+    storageClass: "fast-ssd"
+  adminPassword: "CHANGE_ME_SECURELY"
+  hpa:
+    minReplicas: 3
+    maxReplicas: 6
+
+loki:
+  replicas: 3
+  resources:
+    requests:
+      cpu: 1000m
+      memory: 2Gi
+    limits:
+      cpu: 4000m
+      memory: 8Gi
+  storage:
+    size: 200Gi
+    storageClass: "fast-ssd"
+  retention: 720h  # 30 days
+
+tempo:
+  replicas: 2
+  resources:
+    requests:
+      cpu: 1000m
+      memory: 2Gi
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+  storage:
+    size: 100Gi
+    storageClass: "fast-ssd"
+
+alertmanager:
+  replicas: 3
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
