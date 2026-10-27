@@ -1,0 +1,172 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  lint:
+    name: Lint Kubernetes Manifests
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.28.0'
+
+    - name: Install kubeval
+      run: |
+        wget https://github.com/instrumenta/kubeval/releases/latest/download/kubeval-linux-amd64.tar.gz
+        tar xf kubeval-linux-amd64.tar.gz
+        sudo mv kubeval /usr/local/bin
+
+    - name: Validate Kubernetes manifests
+      run: |
+        find k8s/ -name "*.yaml" -type f -exec kubeval --strict {} \;
+
+    - name: Lint Helm charts
+      run: |
+        helm lint helm/observability
+
+    - name: Install kubeconform
+      run: |
+        wget https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz
+        tar xf kubeconform-linux-amd64.tar.gz
+        sudo mv kubeconform /usr/local/bin
+
+    - name: Validate with kubeconform
+      run: |
+        find k8s/ -name "*.yaml" -type f -exec kubeconform -strict {} \;
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'config'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy results to GitHub Security
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+    - name: Run Checkov
+      uses: bridgecrewio/checkov-action@master
+      with:
+        directory: .
+        framework: kubernetes
+        soft_fail: false
+
+  helm-test:
+    name: Helm Test
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Helm
+      uses: azure/setup-helm@v3
+      with:
+        version: 'v3.13.0'
+
+    - name: Helm template test
+      run: |
+        helm template observability ./helm/observability --values ./helm/observability/values.yaml
+
+    - name: Package Helm chart
+      run: |
+        helm package helm/observability
+
+    - name: Upload Helm chart
+      uses: actions/upload-artifact@v3
+      with:
+        name: helm-chart
+        path: observability-*.tgz
+
+  kustomize-test:
+    name: Kustomize Test
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install kustomize
+      run: |
+        curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+        sudo mv kustomize /usr/local/bin
+
+    - name: Build kustomize
+      run: |
+        kustomize build k8s/base/ > /dev/null
+
+  integration-test:
+    name: Integration Test
+    runs-on: ubuntu-latest
+    needs: [lint, helm-test, kustomize-test]
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Create k3d cluster
+      uses: AbsaOSS/k3d-action@v2
+      with:
+        cluster-name: "test-cluster"
+        args: >-
+          --agents 1
+          --no-lb
+          --k3s-arg "--no-deploy=traefik,servicelb,metrics-server@server:*"
+
+    - name: Install Helm
+      uses: azure/setup-helm@v3
+      with:
+        version: 'v3.13.0'
+
+    - name: Deploy observability stack
+      run: |
+        kubectl create namespace observability
+        helm install observability ./helm/observability \
+          --namespace observability \
+          --values ./helm/observability/values.yaml \
+          --set prometheus.storage.size=1Gi \
+          --set loki.storage.size=1Gi \
+          --set tempo.storage.size=1Gi \
+          --wait \
+          --timeout 10m
+
+    - name: Verify deployment
+      run: |
+        kubectl wait --for=condition=ready pod -l app=prometheus -n observability --timeout=300s
+        kubectl wait --for=condition=ready pod -l app=grafana -n observability --timeout=300s
+        kubectl get pods -n observability
+
+    - name: Run smoke tests
+      run: |
+        # Test Prometheus is accessible
+        kubectl port-forward -n observability svc/prometheus 9090:9090 &
+        sleep 5
+        curl -f http://localhost:9090/-/healthy || exit 1
+        
+        # Test Grafana is accessible
+        kubectl port-forward -n observability svc/grafana 3000:3000 &
+        sleep 5
+        curl -f http://localhost:3000/api/health || exit 1
+
+    - name: Cleanup
+      if: always()
+      run: |
+        helm uninstall observability -n observability || true
+        kubectl delete namespace observability || true
+
